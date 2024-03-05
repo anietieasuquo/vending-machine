@@ -7,11 +7,15 @@ export default (
   authorizationHandler: AuthorizationHandler,
   purchaseHandler: PurchaseHandler
 ): Router => {
-  router.post(
+  /**
+   * @swagger
+   * /purchases: Fetch all purchases
+   */
+  router.get(
     '/',
     app.oauth.authenticate(),
-    authorizationHandler.verifyPermissions({ roles: ['buyer'] }),
-    purchaseHandler.createPurchase
+    authorizationHandler.verifyPermissions({ roles: ['admin'] }),
+    purchaseHandler.getPurchases
   );
   return router;
 };

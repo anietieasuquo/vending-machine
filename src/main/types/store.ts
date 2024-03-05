@@ -29,7 +29,8 @@ export enum PurchaseStatus {
 
 export interface Purchase extends Entity {
   productId: string;
-  userId: string;
+  buyerId: string;
+  sellerId: string;
   amount: Amount;
   status: PurchaseStatus;
 }
@@ -40,6 +41,7 @@ export interface User extends Entity {
   deposit: Amount;
   roleId: string;
   machineId?: string | undefined;
+  isAdmin?: boolean | undefined;
 }
 
 export enum Privilege {
@@ -48,12 +50,14 @@ export enum Privilege {
   DELETE_PRODUCT = 'DELETE_PRODUCT',
   VIEW_PRODUCT = 'VIEW_PRODUCT',
   DEPOSIT = 'DEPOSIT',
-  PURCHASE = 'PURCHASE'
+  PURCHASE = 'PURCHASE',
+  ALL = 'ALL'
 }
 
 export interface Role extends Entity {
   name: string;
   privileges: Privilege[];
+  isAdmin?: boolean | undefined;
 }
 
 export type AccessTokenType = 'access' | 'refresh';

@@ -1,19 +1,30 @@
-import { commonUtils, CrudRepository, logger, LogicalOperator } from 'tspa';
+import {
+  commonUtils,
+  logger,
+  LogicalOperator,
+  Objects,
+  Optional,
+  TransactionalCrudRepository
+} from 'tspa';
 import { AccessClient, AccessToken, AccessTokenType } from '@main/types/store';
 import { generateSha256, getScope, sha256 } from '@main/util/commons';
-import { OAuth2AccessClient } from '@main/types/web';
+import { OAuth2AccessClient, OAuth2RefreshToken } from '@main/types/web';
 import { AuthenticationException } from '@main/exception/AuthenticationException';
 import { UserDto } from '@main/types/dto';
+import { BadRequestException } from '@main/exception/BadRequestException';
+import { AccessClientService } from '@main/services/AccessClientService';
 
 class TokenService {
   public static readonly SUPPORTED_GRANTS: string[] = [
     'password',
-    'client_credentials'
+    'client_credentials',
+    'authorization_code',
+    'refresh_token'
   ];
 
   public constructor(
-    private readonly tokenRepository: CrudRepository<AccessToken>,
-    private readonly clientRepository: CrudRepository<AccessClient>
+    private readonly tokenRepository: TransactionalCrudRepository<AccessToken>,
+    private readonly accessClientService: AccessClientService
   ) {}
 
   public saveToken = async (
@@ -29,56 +40,56 @@ class TokenService {
       clientId,
       type
     } = token;
-    if ((!accessToken && !refreshToken) || !userId || !clientId || !type) {
-      throw new AuthenticationException('Invalid token data');
-    }
-
-    const newToken: AccessToken | undefined = await this.tokenRepository.create(
-      {
-        type,
-        accessToken,
-        refreshToken,
-        accessTokenExpiresAt,
-        refreshTokenExpiresAt,
-        userId,
-        scope: getScope(scope),
-        clientId
-      }
+    Objects.requireNonEmpty(
+      [accessToken, refreshToken, userId, clientId, type],
+      new AuthenticationException('Invalid token data')
     );
 
-    if (!newToken) {
-      throw new AuthenticationException('Failed to create token');
-    }
+    const tokenData = {
+      type: type!,
+      accessToken,
+      refreshToken,
+      accessTokenExpiresAt,
+      refreshTokenExpiresAt,
+      userId: userId!,
+      scope: getScope(scope),
+      clientId: clientId!
+    };
 
-    logger.debug('Token saved:', newToken);
+    Objects.requireTrue(
+      commonUtils.isSafe(tokenData),
+      new BadRequestException('Invalid token data')
+    );
+
+    const newToken: AccessToken = await this.tokenRepository.create(tokenData);
+
+    logger.debug('Token saved:', newToken.id);
     return newToken;
   };
 
-  public findTokenByAccessToken = async (
+  public findAccessToken = async (
     accessToken: string
-  ): Promise<AccessToken | undefined> => {
+  ): Promise<Optional<AccessToken>> => {
     if (commonUtils.isEmpty(accessToken)) {
-      return undefined;
+      return Optional.empty();
     }
 
     return this.tokenRepository.findOneBy({ accessToken });
   };
 
-  public findTokenByRefreshToken = async (
+  public findRefreshToken = async (
     refreshToken: string
-  ): Promise<AccessToken | undefined> => {
+  ): Promise<Optional<AccessToken>> => {
     if (commonUtils.isEmpty(refreshToken)) {
-      return undefined;
+      return Optional.empty();
     }
 
     return this.tokenRepository.findOneBy({ refreshToken });
   };
 
-  public findToken = async (
-    token: string
-  ): Promise<AccessToken | undefined> => {
+  public findToken = async (token: string): Promise<Optional<AccessToken>> => {
     if (commonUtils.isEmpty(token)) {
-      return undefined;
+      return Optional.empty();
     }
 
     return this.tokenRepository.findOneBy(
@@ -87,94 +98,29 @@ class TokenService {
     );
   };
 
-  public findSecretBy = async (
-    filter: Partial<AccessClient>
-  ): Promise<AccessClient | undefined> => {
-    if (commonUtils.isEmpty(filter)) {
-      return undefined;
-    }
-
-    return this.clientRepository.findOneBy(filter);
-  };
-
-  public findSecretById = async (
-    id: string
-  ): Promise<AccessClient | undefined> => {
-    if (commonUtils.isEmpty(id)) {
-      throw new AuthenticationException('Invalid secret data');
-    }
-
-    return this.clientRepository.findById(id);
-  };
-
-  public findSecret = async (
-    clientId: string,
-    clientSecret: string
-  ): Promise<AccessClient | undefined> => {
-    logger.info('Finding secret:', { clientId, clientSecret });
-    if (commonUtils.isAnyEmpty(clientId, clientSecret)) {
-      logger.warn('Invalid secret data:', { clientId, clientSecret });
-      return undefined;
-    }
-
-    const client: AccessClient | undefined =
-      await this.clientRepository.findOneBy({ clientId });
-
-    if (!client) {
-      logger.info('Client not found:', { clientId });
-      return undefined;
-    }
-
-    if (client.clientSecret !== sha256(clientSecret)) {
-      logger.info('Unauthorized client:', clientId);
-      return undefined;
-    }
-
-    return { ...client, clientSecret };
-  };
-
-  public revokeToken = async (refreshToken: string): Promise<boolean> => {
-    if (commonUtils.isEmpty(refreshToken)) {
-      throw new AuthenticationException('Invalid token data');
-    }
-
-    const token: AccessToken | undefined = await this.tokenRepository.findOneBy(
-      {
-        refreshToken
-      }
+  public revokeToken = async (
+    oAuth2RefreshToken: OAuth2RefreshToken
+  ): Promise<boolean> => {
+    Objects.requireNonEmpty(
+      oAuth2RefreshToken,
+      new AuthenticationException('Invalid token data')
     );
-    if (!token) return false;
 
-    return await this.tokenRepository.remove(token.id!);
-  };
+    const { refreshToken, user, client } = oAuth2RefreshToken;
 
-  public createSecret = async (
-    payload: Partial<AccessClient>
-  ): Promise<AccessClient> => {
-    logger.info('Creating secret', payload);
-    const { clientId, clientSecret } = payload;
-    if (commonUtils.isAnyEmpty(clientId, clientSecret)) {
-      throw new AuthenticationException('Invalid secret data');
+    const token: Optional<AccessToken> = await this.tokenRepository.findOneBy({
+      refreshToken
+    });
+    if (token.isEmpty()) {
+      return false;
     }
 
-    const accessClient: AccessClient | undefined =
-      await this.clientRepository.findOneBy({ clientId });
-    if (accessClient) {
-      throw new AuthenticationException('Client already exists');
+    const tokenData: AccessToken = token.get();
+    if (tokenData.userId !== user?.id || tokenData.clientId !== client?.id) {
+      return false;
     }
 
-    const shaSecret = sha256(clientSecret!);
-    const newSecret: AccessClient | undefined =
-      await this.clientRepository.create(<AccessClient>{
-        ...payload,
-        clientId,
-        clientSecret: shaSecret
-      });
-
-    if (!newSecret) {
-      throw new AuthenticationException('Failed to create token');
-    }
-    return newSecret;
+    return this.tokenRepository.remove(tokenData.id!);
   };
 
   public generateToken = async (
@@ -184,18 +130,17 @@ class TokenService {
     scope: string[]
   ): Promise<string> => {
     const { id, secret } = client;
-    if (commonUtils.isAnyEmpty(id, secret)) {
-      throw new AuthenticationException('Invalid client data');
-    }
+    Objects.requireNonEmpty(
+      [id, secret],
+      new AuthenticationException('Invalid client data')
+    );
 
     const clientId: string = id!;
     const clientSecret: string = secret!;
 
-    const accessClient: AccessClient | undefined =
-      await this.clientRepository.findOneBy({ clientId });
-    if (!accessClient) {
-      throw new AuthenticationException('Client does not exist');
-    }
+    const accessClient: AccessClient = (
+      await this.accessClientService.findSecretBy({ clientId })
+    ).orElseThrow(new AuthenticationException('Client does not exist'));
 
     const shaSecret = sha256(clientSecret);
     if (accessClient.clientSecret !== shaSecret) {
@@ -225,10 +170,7 @@ class TokenService {
       clientId
     };
 
-    const accessToken: AccessToken | undefined = await this.saveToken(newToken);
-    if (!accessToken) {
-      throw new AuthenticationException('Failed to create token');
-    }
+    await this.saveToken(newToken);
 
     return token;
   };

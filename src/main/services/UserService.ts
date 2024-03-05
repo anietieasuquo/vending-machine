@@ -1,112 +1,168 @@
-import { commonUtils, CrudRepository, logger } from 'tspa';
+import {
+  commonUtils,
+  logger,
+  MongoSession,
+  Objects,
+  Optional,
+  TransactionalCrudRepository
+} from 'tspa';
 import { Amount, User } from '@main/types/store';
 import { NotFoundException } from '@main/exception/NotFoundException';
 import { sha256 } from '@main/util/commons';
 import { RoleService } from '@main/services/RoleService';
 import { PurchaseService } from '@main/services/PurchaseService';
-import { UserDto, UserRequest } from '@main/types/dto';
-import { fromUserToUserDto } from '@main/util/mapper';
-import { TokenService } from '@main/services/TokenService';
+import { UserRequest } from '@main/types/dto';
+import { InternalServerException } from '@main/exception/InternalServerException';
+import { BadRequestException } from '@main/exception/BadRequestException';
+import { DuplicateEntryException } from '@main/exception/DuplicateEntryException';
+import { AccessClientService } from '@main/services/AccessClientService';
 
 class UserService {
   public constructor(
-    private readonly userRepository: CrudRepository<User>,
+    private readonly userRepository: TransactionalCrudRepository<User>,
     private readonly roleService: RoleService,
-    private readonly tokenService: TokenService
+    private readonly accessClientService: AccessClientService
   ) {}
 
-  public async createUser(request: UserRequest): Promise<UserDto> {
-    const { username, password, deposit, roleId, machineId } = request;
+  public async createUser(request: UserRequest): Promise<User> {
+    const { username, password, deposit, role, machine } = request;
+    Objects.requireNonEmpty(
+      [username, password, role, machine],
+      new BadRequestException('Invalid user data, cannot be serviced')
+    );
 
-    if (
-      commonUtils.isAnyEmpty(
-        username,
-        password,
-        deposit?.value,
-        roleId,
-        machineId
-      )
-    ) {
-      throw new Error('Invalid user data, cannot be serviced');
+    this.checkUsernameAndPassword(username, password);
+
+    const [client, roleResult] = await Promise.all([
+      this.accessClientService.findSecretBy({ name: machine }),
+      this.roleService.findRoleByName(role)
+    ]);
+    client.orElseThrow(new NotFoundException('Machine not found'));
+    roleResult.orElseThrow(new NotFoundException('Role not found'));
+
+    const roleRecord = roleResult.get();
+
+    if (roleRecord.isAdmin) {
+      throw new BadRequestException('Invalid role for user');
     }
 
-    this.checkDeposit(deposit!);
+    (await this.findUserByUsername(username)).ifPresentThrow(
+      new DuplicateEntryException('User already exists')
+    );
 
-    const client = await this.tokenService.findSecretById(machineId);
-    if (!client) throw new NotFoundException('Machine not found');
-
-    const role = await this.roleService.findRoleById(roleId!);
-    if (!role) throw new NotFoundException('Role not found');
-
-    const existingUser = await this.findUserByUsername(username!);
-    if (existingUser) {
-      logger.error('User already exists');
-      throw new Error('User already exists');
+    let depositValue = 0;
+    if (role.toLowerCase() === 'buyer') {
+      this.checkDeposit(deposit);
+      depositValue = deposit!.value;
     }
 
     logger.debug('User does not exist');
-    const shaPassword = sha256(password!);
+    const shaPassword = sha256(password);
 
     logger.debug('Creating user');
-    const newUser: User | undefined = await this.userRepository.create(<User>{
+
+    const userData = <User>{
+      username,
+      deposit: { ...deposit, value: depositValue },
+      roleId: roleRecord.id,
+      password: shaPassword,
+      machineId: client.get().id
+    };
+
+    Objects.requireTrue(
+      commonUtils.isSafe(userData),
+      new BadRequestException('Invalid user data')
+    );
+    return await this.userRepository.create(userData);
+  }
+
+  public async createAdmin(request: UserRequest): Promise<User> {
+    const { username, password, deposit, role, machine } = request;
+    Objects.requireNonEmpty(
+      [username, password, role, machine],
+      new BadRequestException('Invalid user data, cannot be serviced')
+    );
+
+    this.checkUsernameAndPassword(username, password);
+
+    const [client, roleResult] = await Promise.all([
+      this.accessClientService.findSecretBy({ name: machine }),
+      this.roleService.findRoleByName(role)
+    ]);
+    client.orElseThrow(new NotFoundException('Machine not found'));
+    roleResult.orElseThrow(new NotFoundException('Role not found'));
+
+    const roleRecord = roleResult.get();
+
+    Objects.requireTrue(
+      roleRecord.isAdmin,
+      new BadRequestException('Invalid role for admin')
+    );
+
+    (await this.findUserByUsername(username)).ifPresentThrow(
+      new DuplicateEntryException('Admin user already exists')
+    );
+
+    logger.debug('Admin user does not exist, creating admin user');
+    const shaPassword = sha256(password);
+
+    const userData = <User>{
       username,
       deposit,
-      roleId,
+      roleId: roleRecord.id,
       password: shaPassword,
-      machineId
-    });
+      machineId: client.get().id,
+      isAdmin: true
+    };
 
-    if (!newUser) {
-      logger.error('Failed to create user');
-      throw new Error('Failed to create user');
-    }
-
-    return fromUserToUserDto(newUser);
+    Objects.requireTrue(
+      commonUtils.isSafe(userData),
+      new BadRequestException('Invalid user data')
+    );
+    return await this.userRepository.create(userData);
   }
 
-  public async findUserById(id: string): Promise<UserDto | undefined> {
-    const user = await this.userRepository.findById(id);
-    if (!user) return undefined;
-    return fromUserToUserDto(user);
+  public async findUserById(
+    id: string,
+    session?: MongoSession
+  ): Promise<Optional<User>> {
+    return this.userRepository.findById(id, { mongoOptions: { session } });
   }
 
-  public async findBy(filter: Partial<User>): Promise<UserDto | undefined> {
-    const user = await this.userRepository.findOneBy(filter);
-    if (!user) return undefined;
-    return fromUserToUserDto(user);
+  public async findOneBy(filter: Partial<User>): Promise<Optional<User>> {
+    return this.userRepository.findOneBy(filter);
+  }
+
+  public async findAll(
+    filter: Partial<User> | undefined = undefined
+  ): Promise<User[]> {
+    return this.userRepository.findAll(filter);
   }
 
   public async findUserByUsernameAndPassword(
     username: string,
     password: string
-  ): Promise<UserDto | undefined> {
+  ): Promise<Optional<User>> {
     if (commonUtils.isAnyEmpty(username, password)) {
-      throw new Error('Invalid user data');
+      return Optional.empty();
     }
 
     const shaPassword = sha256(password);
-    const user = await this.userRepository.findOneBy({
+    return this.userRepository.findOneBy({
       username,
       password: shaPassword
     });
-    if (!user) return undefined;
-    return fromUserToUserDto(user);
   }
 
-  public async findUserByUsername(
-    username: string
-  ): Promise<UserDto | undefined> {
-    if (commonUtils.isEmpty(username)) throw new Error('Invalid user data');
-    const user = await this.userRepository.findOneBy({ username });
-    if (!user) return undefined;
-    return fromUserToUserDto(user);
+  public async findUserByUsername(username: string): Promise<Optional<User>> {
+    if (commonUtils.isEmpty(username)) return Optional.empty();
+    return this.userRepository.findOneBy({ username });
   }
 
-  public async makeDeposit(id: string, deposit: Amount): Promise<boolean> {
+  public async makeDeposit(id: string, deposit: Amount): Promise<User> {
     this.checkDeposit(deposit);
 
-    const user: UserDto | undefined = await this.findUserById(id);
-    if (!user) throw new NotFoundException('User not found');
+    const user: User = await this.getExpectedUserById(id);
 
     const newDeposit: Amount = {
       value: user.deposit.value + deposit.value,
@@ -115,74 +171,190 @@ class UserService {
     };
 
     const updatedUser: Partial<User> = {
+      ...user,
       deposit: newDeposit
     };
-    const update = await this.userRepository.update(id, <User>updatedUser);
-    if (!update) throw new Error('Failed to make deposit');
-    return true;
+
+    Objects.requireTrue(
+      commonUtils.isSafe(updatedUser),
+      new BadRequestException('Invalid user data')
+    );
+
+    const update = await this.userRepository.update(id, <User>updatedUser, {
+      locking: 'optimistic'
+    });
+    if (!update) throw new InternalServerException('Failed to make deposit');
+    return { ...user, deposit: newDeposit };
+  }
+
+  public async resetDeposit(id: string): Promise<User> {
+    const user: User = await this.getExpectedUserById(id);
+
+    const newDeposit: Amount = {
+      value: 0,
+      unit: user.deposit.unit,
+      currency: user.deposit.currency
+    };
+
+    const updatedUser: Partial<User> = {
+      ...user,
+      deposit: newDeposit
+    };
+
+    Objects.requireTrue(
+      commonUtils.isSafe(updatedUser),
+      new BadRequestException('Invalid user data')
+    );
+
+    const update = await this.userRepository.update(id, updatedUser, {
+      locking: 'optimistic'
+    });
+
+    if (!update) throw new InternalServerException('Failed to reset deposit');
+    return { ...user, deposit: newDeposit };
   }
 
   public async updateUser(
     id: string,
-    request: Partial<UserRequest>
+    request: Partial<UserRequest>,
+    session?: MongoSession
   ): Promise<boolean> {
-    if (commonUtils.isAnyEmpty(id, request)) {
-      throw new Error('Invalid user data');
-    }
+    Objects.requireNonEmpty(
+      [id, request],
+      new BadRequestException('Invalid user data')
+    );
 
-    const { username, password, deposit, roleId } = request;
+    const { password, deposit, role } = request;
 
-    if (!commonUtils.isEmpty(password)) {
-      throw new Error(
+    if (commonUtils.isNoneEmpty(password)) {
+      throw new BadRequestException(
         'Password cannot be updated. Please use changePassword endpoint'
       );
     }
 
-    if (!commonUtils.isEmpty(roleId)) {
-      const role = await this.roleService.findRoleById(roleId!);
-      if (!role) throw new NotFoundException('Role not found');
+    if (commonUtils.isNoneEmpty(role)) {
+      throw new BadRequestException(
+        'Role cannot be updated. Please use updateRole endpoint'
+      );
     }
 
-    const existingUser = await this.userRepository.findById(id);
-    if (!existingUser) throw new NotFoundException('User not found');
+    const existingUser = await this.getExpectedUserById(id, session);
 
-    const updatedUser: User = {
+    const updatedUser: Partial<User> = {
       ...existingUser,
-      username: username || existingUser.username,
-      deposit: deposit || existingUser.deposit,
-      roleId: roleId || existingUser.roleId
+      deposit: deposit || existingUser.deposit
     };
-    const update = await this.userRepository.update(id, updatedUser);
-    if (!update) throw new Error('Failed to update user');
+
+    Objects.requireTrue(
+      commonUtils.isSafe(updatedUser),
+      new BadRequestException('Invalid user data')
+    );
+
+    const update = await this.userRepository.update(id, updatedUser, {
+      locking: 'optimistic',
+      mongoOptions: { session }
+    });
+
+    if (!update) throw new InternalServerException('Failed to update user');
+    return true;
+  }
+
+  public async updateRole(id: string, role: string): Promise<boolean> {
+    logger.info('Updating user role:', { id, role });
+    Objects.requireNonEmpty(
+      [id, role],
+      new BadRequestException('Invalid user data')
+    );
+
+    const [user, roleResult] = await Promise.all([
+      this.getExpectedUserById(id),
+      this.roleService.findRoleByName(role)
+    ]);
+
+    roleResult.orElseThrow(new NotFoundException('Role not found'));
+
+    const updatedUser: Partial<User> = {
+      ...user,
+      roleId: roleResult.get().id
+    };
+
+    Objects.requireTrue(
+      commonUtils.isSafe(updatedUser),
+      new BadRequestException('Invalid user data')
+    );
+
+    const update = await this.userRepository.update(id, updatedUser, {
+      locking: 'optimistic'
+    });
+
+    if (!update) throw new InternalServerException('Failed to update role');
     return true;
   }
 
   public async changePassword(id: string, password: string): Promise<boolean> {
-    if (commonUtils.isAnyEmpty(id, password)) {
-      throw new Error('Invalid user data');
-    }
+    Objects.requireNonEmpty(
+      [password, id],
+      new BadRequestException('Invalid user data')
+    );
+
+    this.checkUsernameAndPassword('username', password);
+
+    const user = await this.getExpectedUserById(id);
 
     const shaPassword = sha256(password);
-    return await this.userRepository.update(id, { password: shaPassword });
+
+    const updatedUser = { ...user, password: shaPassword };
+
+    Objects.requireTrue(
+      commonUtils.isSafe(updatedUser),
+      new BadRequestException('Invalid user data')
+    );
+
+    return this.userRepository.update(id, updatedUser, {
+      locking: 'optimistic'
+    });
   }
 
   public async removeUser(id: string): Promise<boolean> {
-    if (commonUtils.isEmpty(id)) throw new Error('Invalid userId');
+    Objects.requireNonEmpty(id, new BadRequestException('Invalid userId'));
+
+    await this.getExpectedUserById(id);
     return this.userRepository.remove(id);
   }
 
-  public async isValidUser(username: string): Promise<boolean> {
-    if (commonUtils.isEmpty(username)) throw new Error('Invalid user data');
-    return (await this.findUserByUsername(username)) !== undefined;
-  }
+  private checkDeposit(deposit?: Amount): void {
+    if (!deposit) {
+      throw new BadRequestException('Invalid deposit');
+    }
 
-  private checkDeposit(deposit: Amount): void {
     const acceptedDepositAmounts = PurchaseService.SUPPORTED_DENOMINATIONS;
     if (!acceptedDepositAmounts.includes(deposit.value)) {
-      throw new Error(
+      throw new BadRequestException(
         `Invalid deposit. Only ${acceptedDepositAmounts.join(', ')} cent coins are allowed`
       );
     }
+  }
+
+  private async getExpectedUserById(
+    id: string,
+    session?: MongoSession
+  ): Promise<User> {
+    return (
+      await this.userRepository.findById(id, { mongoOptions: { session } })
+    ).orElseThrow(new NotFoundException('User not found'));
+  }
+
+  private checkUsernameAndPassword(username: string, password: string): void {
+    Objects.requireTrue(
+      [
+        username.trim().length >= 5,
+        username.trim().length <= 20,
+        password.trim().length >= 6
+      ],
+      new BadRequestException(
+        'Invalid username or password length (username: 5-20, password: 6+)'
+      )
+    );
   }
 }
 

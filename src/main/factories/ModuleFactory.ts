@@ -1,4 +1,4 @@
-import { CrudRepository, logger, MongoCrudRepository } from 'tspa';
+import { logger, MongoCrudRepository, TransactionalCrudRepository } from 'tspa';
 import {
   AccessClient,
   AccessToken,
@@ -17,6 +17,7 @@ import {
   Oauth2AuthHandler,
   ProductHandler,
   PurchaseHandler,
+  RoleHandler,
   UserHandler
 } from '@main/types/web';
 import oauth2Handler from '@main/handlers/oauth2Handler';
@@ -28,6 +29,9 @@ import { RoleService } from '@main/services/RoleService';
 import { ProductService } from '@main/services/ProductService';
 import { PurchaseService } from '@main/services/PurchaseService';
 import authorizationHandler from '@main/handlers/authorizationHandler';
+import { StartupResponse } from '@main/types/dto';
+import { AccessClientService } from '@main/services/AccessClientService';
+import roleRequestHandler from '@main/handlers/roleRequestHandler';
 
 class ModuleFactory {
   private static instance: ModuleFactory;
@@ -41,7 +45,8 @@ class ModuleFactory {
     deposit: { value: 0, unit: 'cents', currency: 'EUR' },
     password: '',
     roleId: '',
-    username: ''
+    username: '',
+    isAdmin: false
   };
 
   private readonly accessTokenPrototype: AccessToken = {
@@ -63,7 +68,8 @@ class ModuleFactory {
     name: '',
     dateCreated: Date.now(),
     deleted: false,
-    privileges: [Privilege.DEPOSIT]
+    privileges: [Privilege.DEPOSIT],
+    isAdmin: false
   };
 
   private readonly clientPrototype: AccessClient = {
@@ -93,32 +99,45 @@ class ModuleFactory {
     dateCreated: Date.now(),
     deleted: false,
     productId: '',
-    userId: '',
+    buyerId: '',
+    sellerId: '',
     amount: { value: 0, unit: 'cents', currency: 'EUR' },
     status: PurchaseStatus.PENDING
   };
 
-  private userRepository: CrudRepository<User> | undefined;
-  private tokenRepository: CrudRepository<AccessToken> | undefined;
-  private roleRepository: CrudRepository<Role> | undefined;
-  private clientRepository: CrudRepository<AccessClient> | undefined;
-  private productRepository: CrudRepository<Product> | undefined;
-  private purchaseRepository: CrudRepository<Purchase> | undefined;
+  private readonly mongoConnectionOptions = {
+    bufferCommands: false
+  };
+
+  private userRepository: TransactionalCrudRepository<User> | undefined;
+  private tokenRepository: TransactionalCrudRepository<AccessToken> | undefined;
+  private roleRepository: TransactionalCrudRepository<Role> | undefined;
+  private clientRepository:
+    | TransactionalCrudRepository<AccessClient>
+    | undefined;
+  private productRepository: TransactionalCrudRepository<Product> | undefined;
+  private purchaseRepository: TransactionalCrudRepository<Purchase> | undefined;
 
   private userService: UserService | undefined;
   private roleService: RoleService | undefined;
   private tokenService: TokenService | undefined;
   private productService: ProductService | undefined;
   private purchaseService: PurchaseService | undefined;
+  private accessClientService: AccessClientService | undefined;
 
   private authHandler: Oauth2AuthHandler | undefined;
   private userHandler: UserHandler | undefined;
   private productHandler: ProductHandler | undefined;
   private purchaseHandler: PurchaseHandler | undefined;
   private authorizationHandler: AuthorizationHandler | undefined;
-  private startupHandler: GenericHandler<void, Promise<void>> | undefined;
+  private roleHandler: RoleHandler | undefined;
+  private startupHandler:
+    | GenericHandler<void, Promise<StartupResponse>>
+    | undefined;
 
-  private constructor() {}
+  private constructor() {
+    logger.info('ModuleFactory > constructor: ', this.mongoUri);
+  }
 
   public static get getAuthHandler(): Oauth2AuthHandler {
     logger.info('getAuthHandler');
@@ -127,6 +146,7 @@ class ModuleFactory {
     return (this.getInstance.authHandler = oauth2Handler(
       this.getUserService,
       this.getTokenService,
+      this.getAccessClientService,
       this.getRoleService
     ));
   }
@@ -136,7 +156,10 @@ class ModuleFactory {
       return this.getInstance.authorizationHandler;
     return (this.getInstance.authorizationHandler = authorizationHandler(
       this.getTokenService,
-      this.getProductService
+      this.getAccessClientService,
+      this.getProductService,
+      this.getUserService,
+      this.getRoleService
     ));
   }
 
@@ -150,7 +173,8 @@ class ModuleFactory {
   public static get getProductHandler(): ProductHandler {
     if (this.getInstance.productHandler) return this.getInstance.productHandler;
     return (this.getInstance.productHandler = productAccountHandler(
-      this.getProductService
+      this.getProductService,
+      this.getPurchaseService
     ));
   }
 
@@ -162,27 +186,39 @@ class ModuleFactory {
     ));
   }
 
-  public static get getStartupHandler(): GenericHandler<void, Promise<void>> {
-    if (this.getInstance.startupHandler) return this.getInstance.startupHandler;
-    return (this.getInstance.startupHandler = startupHandler(
-      this.getRoleService,
-      this.getTokenService
+  public static get getRoleHandler(): RoleHandler {
+    if (this.getInstance.roleHandler) return this.getInstance.roleHandler;
+    return (this.getInstance.roleHandler = roleRequestHandler(
+      this.getRoleService
     ));
   }
 
-  public static get getRoleRepository(): CrudRepository<Role> {
+  public static get getStartupHandler(): GenericHandler<
+    void,
+    Promise<StartupResponse>
+  > {
+    if (this.getInstance.startupHandler) return this.getInstance.startupHandler;
+    return (this.getInstance.startupHandler = startupHandler(
+      this.getRoleService,
+      this.getAccessClientService,
+      this.getUserService
+    ));
+  }
+
+  public static get getRoleRepository(): TransactionalCrudRepository<Role> {
     if (this.getInstance.roleRepository) return this.getInstance.roleRepository;
     return (this.getInstance.roleRepository = MongoCrudRepository.initFor<Role>(
       'roles',
       {
         entities: [{ roles: this.getInstance.rolePrototype }],
         uri: this.getInstance.mongoUri || '',
-        appName: this.getInstance.appName || ''
+        appName: this.getInstance.appName || '',
+        connectionOptions: this.getInstance.mongoConnectionOptions
       }
     ));
   }
 
-  public static get getTokenRepository(): CrudRepository<AccessToken> {
+  public static get getTokenRepository(): TransactionalCrudRepository<AccessToken> {
     if (this.getInstance.tokenRepository) {
       return this.getInstance.tokenRepository;
     }
@@ -190,23 +226,25 @@ class ModuleFactory {
       MongoCrudRepository.initFor<AccessToken>('accessTokens', {
         entities: [{ accessTokens: this.getInstance.accessTokenPrototype }],
         uri: this.getInstance.mongoUri || '',
-        appName: this.getInstance.appName || ''
+        appName: this.getInstance.appName || '',
+        connectionOptions: this.getInstance.mongoConnectionOptions
       }));
   }
 
-  public static get getUserRepository(): CrudRepository<User> {
+  public static get getUserRepository(): TransactionalCrudRepository<User> {
     if (this.getInstance.userRepository) return this.getInstance.userRepository;
     return (this.getInstance.userRepository = MongoCrudRepository.initFor<User>(
       'users',
       {
         entities: [{ users: this.getInstance.userPrototype }],
         uri: this.getInstance.mongoUri || '',
-        appName: this.getInstance.appName || ''
+        appName: this.getInstance.appName || '',
+        connectionOptions: this.getInstance.mongoConnectionOptions
       }
     ));
   }
 
-  public static get getClientRepository(): CrudRepository<AccessClient> {
+  public static get getClientRepository(): TransactionalCrudRepository<AccessClient> {
     if (this.getInstance.clientRepository) {
       return this.getInstance.clientRepository;
     }
@@ -215,11 +253,12 @@ class ModuleFactory {
       MongoCrudRepository.initFor<AccessClient>('accessClients', {
         entities: [{ accessClients: this.getInstance.clientPrototype }],
         uri: this.getInstance.mongoUri || '',
-        appName: this.getInstance.appName || ''
+        appName: this.getInstance.appName || '',
+        connectionOptions: this.getInstance.mongoConnectionOptions
       }));
   }
 
-  public static get getProductRepository(): CrudRepository<Product> {
+  public static get getProductRepository(): TransactionalCrudRepository<Product> {
     if (this.getInstance.productRepository) {
       return this.getInstance.productRepository;
     }
@@ -228,11 +267,12 @@ class ModuleFactory {
       MongoCrudRepository.initFor<Product>('products', {
         entities: [{ products: this.getInstance.productPrototype }],
         uri: this.getInstance.mongoUri || '',
-        appName: this.getInstance.appName || ''
+        appName: this.getInstance.appName || '',
+        connectionOptions: this.getInstance.mongoConnectionOptions
       }));
   }
 
-  public static get getPurchaseRepository(): CrudRepository<Purchase> {
+  public static get getPurchaseRepository(): TransactionalCrudRepository<Purchase> {
     if (this.getInstance.purchaseRepository) {
       return this.getInstance.purchaseRepository;
     }
@@ -241,7 +281,8 @@ class ModuleFactory {
       MongoCrudRepository.initFor<Purchase>('purchases', {
         entities: [{ purchases: this.getInstance.purchasePrototype }],
         uri: this.getInstance.mongoUri || '',
-        appName: this.getInstance.appName || ''
+        appName: this.getInstance.appName || '',
+        connectionOptions: this.getInstance.mongoConnectionOptions
       }));
   }
 
@@ -249,6 +290,14 @@ class ModuleFactory {
     if (this.getInstance.tokenService) return this.getInstance.tokenService;
     return (this.getInstance.tokenService = new TokenService(
       this.getTokenRepository,
+      this.getAccessClientService
+    ));
+  }
+
+  public static get getAccessClientService(): AccessClientService {
+    if (this.getInstance.accessClientService)
+      return this.getInstance.accessClientService;
+    return (this.getInstance.accessClientService = new AccessClientService(
       this.getClientRepository
     ));
   }
@@ -265,7 +314,7 @@ class ModuleFactory {
     return (this.getInstance.userService = new UserService(
       this.getUserRepository,
       this.getRoleService,
-      this.getTokenService
+      this.getAccessClientService
     ));
   }
 

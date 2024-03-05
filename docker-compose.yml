@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:7.0-jammy
+    container_name: mongodb
+    hostname: mongodb
+    volumes:
+      - ./mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_DATABASE: vending-machine
+    entrypoint: [ "/usr/bin/mongod", "--bind_ip_all", "--replSet", "vending-machine-rs" ]
+  mongo-setup:
+    image: mongo:7.0-jammy
+    depends_on:
+      - mongodb
+    restart: "no"
+    entrypoint: [ "bash", "-c", "sleep 10 && mongosh --host mongodb:27017 --eval \"rs.initiate({ '_id': 'vending-machine-rs', 'version': 1, 'members': [{ '_id': 1, 'host': 'mongodb:27017' }] }, { force: true })\" && echo 'Done with replica-set initialization'" ]
+  app:
+    container_name: vending-machine
+    build: .
+    ports:
+      - '3000:3000'
+    depends_on:
+      - mongodb
+      - mongo-setup
+    environment:
+      TSPA_MONGO_URI: 'mongodb://mongodb:27017/vending-machine?authSource=admin&replicaSet=vending-machine-rs'
+      TSPA_APP_NAME: 'vending-machine'
+      TSPA_LOG_LEVEL: 'debug'
+      TSPA_INTERNAL_LOG_LEVEL: 'debug'
+      DEFAULT_ADMIN_USERNAME: 'admin'
+      DEFAULT_ADMIN_PASSWORD: 'Admin!user!24!7!365%%'
+      DEFAULT_VENDING_MACHINE_NAME: 'Default'
+      PORT: 3000
+    volumes:
+      - ./app:/app

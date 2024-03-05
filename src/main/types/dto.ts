@@ -1,11 +1,19 @@
-import { Amount, CompositeAmount, PurchaseStatus } from '@main/types/store';
+import {
+  AccessClient,
+  Amount,
+  CompositeAmount,
+  Privilege,
+  PurchaseStatus,
+  Role,
+  User
+} from '@main/types/store';
 
 export interface UserRequest {
   username: string;
   password: string;
-  deposit: Amount;
-  roleId: string;
-  machineId: string;
+  deposit?: Amount;
+  role: string;
+  machine: string;
 }
 
 export interface UserDto {
@@ -19,11 +27,11 @@ export interface UserDto {
 }
 
 export interface ProductRequest {
-  productName: string;
+  productName?: string;
   productDescription?: string | undefined;
-  amountAvailable: number;
-  cost: Amount;
-  sellerId: string;
+  amountAvailable?: number;
+  cost?: Amount;
+  sellerId?: string | undefined;
 }
 
 export interface ProductDto {
@@ -38,25 +46,45 @@ export interface ProductDto {
 }
 
 export interface PurchaseRequest {
-  productId: string;
   userId: string;
   quantity: number;
 }
 
-export interface CreatePurchaseResponse {
+export interface PurchaseResponse {
+  id: string;
+  buyerId: string;
   totalSpent: Amount;
   change: CompositeAmount;
   product: ProductDto;
+  dateCreated: number;
 }
 
 export interface PurchaseDto {
-  transactionId: string;
+  id: string;
   productId: string;
-  userId: string;
+  buyerId: string;
+  sellerId: string;
   amount: Amount;
+  status: PurchaseStatus;
   dateCreated: number;
   dateUpdated?: number | undefined;
-  status: PurchaseStatus;
+}
+
+export interface PurchaseFilter {
+  productId?: string;
+  userId?: string;
+  amount?: Amount;
+  status?: PurchaseStatus;
+  dateCreated?: number;
+  dateUpdated?: number | undefined;
+}
+
+export interface RoleDto {
+  id: string;
+  name: string;
+  privileges: Privilege[];
+  dateCreated: number;
+  dateUpdated?: number | undefined;
 }
 
 export interface GenericResponse<T> {
@@ -64,7 +92,7 @@ export interface GenericResponse<T> {
   data: T;
 }
 
-export interface MakeDepositRequest {
+export interface DepositRequest {
   amount: Amount;
 }
 
@@ -73,4 +101,10 @@ export interface ErrorResponse {
   code: number;
   timestamp: string;
   path: string;
+}
+
+export interface StartupResponse {
+  roles: Role[];
+  accessClient: AccessClient;
+  admin: User;
 }

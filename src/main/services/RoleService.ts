@@ -1,42 +1,65 @@
-import { commonUtils, CrudRepository, logger } from 'tspa';
+import {
+  commonUtils,
+  logger,
+  Objects,
+  Optional,
+  TransactionalCrudRepository
+} from 'tspa';
 import { Role } from '@main/types/store';
+import { BadRequestException } from '@main/exception/BadRequestException';
 
 class RoleService {
-  public constructor(private readonly roleRepository: CrudRepository<Role>) {}
+  public constructor(
+    private readonly roleRepository: TransactionalCrudRepository<Role>
+  ) {}
 
   public async createRole(role: Partial<Role>): Promise<Role> {
     logger.info('Creating role:', role);
     const { name, privileges } = role;
-
-    if (commonUtils.isAnyEmpty(name, privileges)) {
-      throw new Error('Invalid role data');
-    }
-
-    const existingRole: Role | undefined = await this.roleRepository.findOneBy({
-      name: name!
-    });
-
-    if (existingRole) {
-      logger.error('Role already exists');
-      throw new Error('Role already exists');
-    }
-
-    logger.debug('Role does not exist');
-    const newRole: Role | undefined = await this.roleRepository.create(
-      <Role>role
+    Objects.requireNonEmpty(
+      [name, privileges],
+      new BadRequestException('Invalid role data')
     );
-    if (!newRole) {
-      logger.error('Failed to create role');
-      throw new Error('Failed to create role');
-    }
-    return newRole;
+
+    (await this.roleRepository.findOneBy({ name })).ifPresentThrow(
+      new BadRequestException('Role already exists')
+    );
+
+    Objects.requireTrue(
+      commonUtils.isSafe(role),
+      new BadRequestException('Invalid purchase data')
+    );
+
+    return await this.roleRepository.create(<Role>role);
   }
 
-  public async findRoleById(id: string): Promise<Role | undefined> {
+  public async createRoles(roles: Partial<Role>[]): Promise<Role[]> {
+    logger.info('Creating roles:', roles);
+    roles.forEach((role) => {
+      const { name, privileges } = role;
+      Objects.requireNonEmpty(
+        [name, privileges],
+        new BadRequestException('Invalid role data')
+      );
+    });
+
+    Objects.requireTrue(
+      commonUtils.isSafe(roles),
+      new BadRequestException('Invalid purchase data')
+    );
+
+    return await this.roleRepository.createAll(<Role[]>roles);
+  }
+
+  public async findRoleById(id: string): Promise<Optional<Role>> {
     return this.roleRepository.findById(id);
   }
 
-  public async findRoleByName(name: string): Promise<Role | undefined> {
+  public async getRoles(filter?: Partial<Role>): Promise<Role[]> {
+    return this.roleRepository.findAll(filter);
+  }
+
+  public async findRoleByName(name: string): Promise<Optional<Role>> {
     return this.roleRepository.findOneBy({ name });
   }
 }

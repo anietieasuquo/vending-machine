@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "exclude": [
+    "node_modules",
+    "dist",
+    "docker"
+  ],
+  "include": [
+    "src/main/**/*",
+    "src/tests/**/*",
+    ".eslintrc.json"
+  ],
+  "compilerOptions": {
+    "allowJs": true
+  }
+}

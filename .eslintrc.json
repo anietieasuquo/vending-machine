@@ -14,7 +14,8 @@
   ],
   "parserOptions": {
     "project": [
-      "./tsconfig.json"
+      "./tsconfig.json",
+      "./tsconfig-eslint.json"
     ]
   },
   "rules": {
@@ -38,12 +39,23 @@
     "no-empty-pattern": "off",
     "no-mixed-spaces-and-tabs": "error",
     "no-implicit-globals": "error",
-    "prefer-spread": "off"
+    "prefer-spread": "off",
+    "function-call-argument-newline": [
+      "error",
+      "consistent"
+    ],
+    "array-element-newline": [
+      "error",
+      "consistent"
+    ]
   },
   "globals": {},
   "ignorePatterns": [
     "**/*.d.ts",
-    "**/babel.config.js"
+    "**/babel.config.js",
+    "**/jest.config.js",
+    "dist",
+    ".eslintrc.json"
   ],
   "env": {
     "jest/globals": true

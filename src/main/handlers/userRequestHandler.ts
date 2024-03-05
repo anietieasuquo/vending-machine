@@ -3,13 +3,17 @@ import { UserHandler } from '@main/types/web';
 import { UserService } from '@main/services/UserService';
 import { NotFoundException } from '@main/exception/NotFoundException';
 import {
+  DepositRequest,
   GenericResponse,
-  MakeDepositRequest,
   UserDto,
   UserRequest
 } from '@main/types/dto';
-import { commonUtils, logger } from 'tspa';
+import { logger, Objects } from 'tspa';
 import { executeRequest } from '@main/handlers/requestHandler';
+import { BadRequestException } from '@main/exception/BadRequestException';
+import { User } from '@main/types/store';
+import { fromUserToUserDto } from '@main/util/mapper';
+import { InternalServerException } from '@main/exception/InternalServerException';
 
 let userService: UserService;
 
@@ -20,15 +24,41 @@ const createUser = async (
   await executeRequest<UserDto>(
     async () => {
       logger.info('Creating user:', request.body);
-      const { username, password, deposit, roleId, machineId }: UserRequest =
-        request.body;
-      if (
-        commonUtils.isAnyEmpty(username, password, deposit, roleId, machineId)
-      ) {
-        throw new Error('Invalid user, cannot be handled');
-      }
+      const { username, password, role, machine }: UserRequest = request.body;
+      Objects.requireNonEmpty(
+        [username, password, role, machine],
+        new BadRequestException('Invalid user data, cannot be processed')
+      );
 
-      return await userService.createUser(request.body as UserRequest);
+      const newUser: User = await userService.createUser(
+        request.body as UserRequest
+      );
+      return fromUserToUserDto(newUser);
+    },
+    201,
+    response,
+    request
+  );
+};
+
+const createAdmin = async (
+  request: Request,
+  response: Response
+): Promise<void> => {
+  await executeRequest<UserDto>(
+    async () => {
+      logger.info('Creating admin user:', request.body);
+      const { username, password, deposit, role, machine }: UserRequest =
+        request.body;
+      Objects.requireNonEmpty(
+        [username, password, deposit, role, machine],
+        new BadRequestException('Invalid user, cannot be handled')
+      );
+
+      const newUser: User = await userService.createAdmin(
+        request.body as UserRequest
+      );
+      return fromUserToUserDto(newUser);
     },
     201,
     response,
@@ -43,11 +73,27 @@ const fetchUserById = async (
   await executeRequest<UserDto>(
     async () => {
       const { id } = request.params;
-      if (commonUtils.isEmpty(id)) throw new Error('Invalid user id');
+      Objects.requireNonEmpty(id, new BadRequestException('Invalid user id'));
 
-      const user = await userService.findUserById(id!);
-      if (!user) throw new NotFoundException('User not found');
-      return user;
+      const user: User = (await userService.findUserById(id)).orElseThrow(
+        new NotFoundException('User not found')
+      );
+      return fromUserToUserDto(user);
+    },
+    200,
+    response,
+    request
+  );
+};
+
+const fetchAllUsers = async (
+  request: Request,
+  response: Response
+): Promise<void> => {
+  await executeRequest<UserDto[]>(
+    async () => {
+      const users: User[] = await userService.findAll();
+      return users.map(fromUserToUserDto);
     },
     200,
     response,
@@ -59,21 +105,38 @@ const makeDeposit = async (
   request: Request,
   response: Response
 ): Promise<void> => {
-  await executeRequest<GenericResponse<string>>(
+  await executeRequest<Pick<UserDto, 'deposit'>>(
     async () => {
       const { id } = request.params;
-      const depositRequest: MakeDepositRequest = request.body;
-      if (commonUtils.isAnyEmpty(id, depositRequest.amount)) {
-        throw new Error('Invalid deposit data');
-      }
+      const depositRequest: DepositRequest = request.body;
+      Objects.requireNonEmpty(
+        [id, depositRequest.amount],
+        new BadRequestException('Invalid deposit data')
+      );
 
-      const update = await userService.makeDeposit(id!, depositRequest.amount);
-      const data = update ? 'Success' : 'Failed';
+      const { deposit } = await userService.makeDeposit(
+        id,
+        depositRequest.amount
+      );
+      return { deposit };
+    },
+    200,
+    response,
+    request
+  );
+};
 
-      return {
-        success: update,
-        data
-      };
+const resetDeposit = async (
+  request: Request,
+  response: Response
+): Promise<void> => {
+  await executeRequest<Pick<UserDto, 'deposit'>>(
+    async () => {
+      const { id } = request.params;
+      Objects.requireNonEmpty(id, new BadRequestException('Invalid user id'));
+
+      const { deposit } = await userService.resetDeposit(id);
+      return { deposit };
     },
     200,
     response,
@@ -87,19 +150,53 @@ const updateRole = async (
 ): Promise<void> => {
   await executeRequest<GenericResponse<string>>(
     async () => {
-      const { id, roleId } = request.params;
-      if (commonUtils.isAnyEmpty(id, roleId) || !roleId) {
-        throw new Error('Invalid user data');
-      }
+      const { id } = request.params;
+      const { role }: UserRequest = request.body;
+      Objects.requireNonEmpty(
+        [id, role],
+        new BadRequestException('Invalid user data')
+      );
 
-      const update = await userService.updateUser(id!, {
-        roleId
-      });
-      const data = update ? 'Updated' : 'Failed';
+      const update = await userService.updateRole(id, role);
+
+      Objects.requireTrue(
+        update,
+        new InternalServerException('Failed to update user role')
+      );
 
       return {
         success: update,
-        data
+        data: `Role updated successfully`
+      };
+    },
+    200,
+    response,
+    request
+  );
+};
+
+const changePassword = async (
+  request: Request,
+  response: Response
+): Promise<void> => {
+  await executeRequest<GenericResponse<string>>(
+    async () => {
+      const { id } = request.params;
+      const { password }: UserRequest = request.body;
+      Objects.requireNonEmpty(
+        [id, password],
+        new BadRequestException('Invalid user data')
+      );
+      const update = await userService.changePassword(id, password);
+
+      Objects.requireTrue(
+        update,
+        new InternalServerException('Failed to change password')
+      );
+
+      return {
+        success: update,
+        data: 'Password changed successfully'
       };
     },
     200,
@@ -115,17 +212,17 @@ const deleteUser = async (
   await executeRequest<GenericResponse<string>>(
     async () => {
       const { id } = request.params;
-      if (commonUtils.isAnyEmpty(id)) {
-        throw new Error('Invalid User ID');
-      }
+      Objects.requireNonEmpty([id], new BadRequestException('Invalid user id'));
 
-      const removal = await userService.removeUser(id!);
-      if (!removal) throw new Error('Failed to delete user');
-      const data = removal ? 'Deleted' : 'Failed';
+      const removal = await userService.removeUser(id);
+      Objects.requireTrue(
+        removal,
+        new InternalServerException('Failed to delete user')
+      );
 
       return {
         success: removal,
-        data
+        data: 'User deleted successfully'
       };
     },
     200,
@@ -139,9 +236,13 @@ export default (injectedUserService: UserService): UserHandler => {
 
   return {
     createUser,
+    createAdmin,
     fetchUserById,
+    fetchAllUsers,
     makeDeposit,
+    resetDeposit,
     updateRole,
+    changePassword,
     deleteUser
   };
 };

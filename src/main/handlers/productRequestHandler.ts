@@ -1,12 +1,27 @@
 import { Request, Response } from 'express';
 import { ProductHandler } from '@main/types/web';
 import { NotFoundException } from '@main/exception/NotFoundException';
-import { GenericResponse, ProductDto, ProductRequest } from '@main/types/dto';
-import { commonUtils, logger } from 'tspa';
+import {
+  GenericResponse,
+  ProductDto,
+  ProductRequest,
+  PurchaseDto,
+  PurchaseRequest,
+  PurchaseResponse
+} from '@main/types/dto';
+import { logger, Objects } from 'tspa';
 import { ProductService } from '@main/services/ProductService';
 import { executeRequest } from '@main/handlers/requestHandler';
+import { BadRequestException } from '@main/exception/BadRequestException';
+import { Product } from '@main/types/store';
+import {
+  fromProductToProductDto,
+  fromPurchaseToPurchaseDto
+} from '@main/util/mapper';
+import { PurchaseService } from '@main/services/PurchaseService';
 
 let productService: ProductService;
+let purchaseService: PurchaseService;
 
 const createProduct = async (
   request: Request,
@@ -17,19 +32,18 @@ const createProduct = async (
       logger.info('Creating product:', request.body);
       const { productName, amountAvailable, sellerId, cost }: ProductRequest =
         request.body;
-      if (
-        commonUtils.isAnyEmpty(productName, amountAvailable, sellerId, cost)
-      ) {
-        throw new Error('Invalid product data');
-      }
+      Objects.requireNonEmpty(
+        [productName, amountAvailable, sellerId, cost],
+        new BadRequestException('Invalid product data')
+      );
 
-      const product: ProductDto = await productService.createProduct(
+      const product: Product = await productService.createProduct(
         request.body as ProductRequest
       );
 
       logger.info('Product created:', product);
 
-      return product;
+      return fromProductToProductDto(product);
     },
     201,
     response,
@@ -44,12 +58,15 @@ const fetchProductById = async (
   await executeRequest<ProductDto>(
     async () => {
       const { id } = request.params;
-      if (commonUtils.isEmpty(id)) throw new Error('Invalid product id');
+      Objects.requireNonEmpty(
+        id,
+        new BadRequestException('Invalid product id')
+      );
 
-      const product: ProductDto | undefined =
-        await productService.findProductById(id!);
-      if (!product) throw new NotFoundException('Product not found');
-      return product;
+      const product: Product = (
+        await productService.findProductById(id)
+      ).orElseThrow(new NotFoundException('Product not found'));
+      return fromProductToProductDto(product);
     },
     200,
     response,
@@ -64,7 +81,9 @@ const fetchAllProducts = async (
   logger.info('Fetching all products', request.headers.authorization);
   await executeRequest<ProductDto[]>(
     async () => {
-      return productService.findAllProducts();
+      return (await productService.findAllProducts()).map(
+        fromProductToProductDto
+      );
     },
     200,
     response,
@@ -80,11 +99,12 @@ const updateProduct = async (
     async () => {
       const { id } = request.params;
       const productRequest: ProductRequest = request.body;
-      if (commonUtils.isAnyEmpty(id, productRequest)) {
-        throw new Error('Invalid User data');
-      }
+      Objects.requireNonEmpty(
+        [id, productRequest],
+        new BadRequestException('Invalid product data')
+      );
 
-      const update = await productService.updateProduct(id!, productRequest);
+      const update = await productService.updateProduct(id, productRequest);
       const data = update ? 'Updated' : 'Failed';
 
       return {
@@ -98,6 +118,36 @@ const updateProduct = async (
   );
 };
 
+const makePurchase = async (
+  request: Request,
+  response: Response
+): Promise<void> => {
+  await executeRequest<PurchaseResponse>(
+    async () => {
+      const { id } = request.params;
+      logger.info('Creating purchase:', { body: request.body, id });
+      const { userId, quantity }: PurchaseRequest = request.body;
+      Objects.requireNonEmpty(
+        [id, userId, quantity],
+        new BadRequestException('Invalid purchase data')
+      );
+
+      const purchaseResponse: PurchaseResponse =
+        await purchaseService.createPurchase(
+          id,
+          request.body as PurchaseRequest
+        );
+
+      logger.info('Purchase created:', purchaseResponse);
+
+      return purchaseResponse;
+    },
+    201,
+    response,
+    request
+  );
+};
+
 const deleteProduct = async (
   request: Request,
   response: Response
@@ -105,15 +155,16 @@ const deleteProduct = async (
   await executeRequest<GenericResponse<string>>(
     async () => {
       const { id } = request.params;
-      if (commonUtils.isAnyEmpty(id)) {
-        throw new Error('Invalid User ID');
-      }
+      Objects.requireNonEmpty(
+        id,
+        new BadRequestException('Invalid product ID')
+      );
 
-      const update = await productService.deleteProduct(id!);
-      const data = update ? 'Deleted' : 'Failed';
+      const deleted = await productService.deleteProduct(id);
+      const data = deleted ? 'Deleted' : 'Failed';
 
       return {
-        success: update,
+        success: deleted,
         data
       };
     },
@@ -123,14 +174,42 @@ const deleteProduct = async (
   );
 };
 
-export default (injectedProductService: ProductService): ProductHandler => {
+const fetchPurchasesByProductId = async (
+  request: Request,
+  response: Response
+): Promise<void> => {
+  await executeRequest<PurchaseDto[]>(
+    async () => {
+      const { id } = request.params;
+      Objects.requireNonEmpty(
+        id,
+        new BadRequestException('Invalid product ID')
+      );
+
+      return (await purchaseService.getPurchases({ productId: id })).map(
+        fromPurchaseToPurchaseDto
+      );
+    },
+    200,
+    response,
+    request
+  );
+};
+
+export default (
+  injectedProductService: ProductService,
+  injectedPurchaseService: PurchaseService
+): ProductHandler => {
   productService = injectedProductService;
+  purchaseService = injectedPurchaseService;
 
   return {
     createProduct,
     fetchProductById,
     fetchAllProducts,
     updateProduct,
+    makePurchase,
+    fetchPurchasesByProductId,
     deleteProduct
   };
 };

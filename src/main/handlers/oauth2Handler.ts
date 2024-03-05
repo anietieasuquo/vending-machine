@@ -2,44 +2,49 @@ import {
   AccessClient,
   AccessToken,
   AccessTokenType,
-  Role
+  Role,
+  User
 } from '@main/types/store';
 import {
-  Oauth2AuthHandler,
   OAuth2AccessClient,
   OAuth2AccessToken,
+  Oauth2AuthHandler,
   OAuth2RefreshToken,
   OAuth2Tokens
 } from '@main/types/web';
 import { UserService } from '@main/services/UserService';
 import { TokenService } from '@main/services/TokenService';
 import { RoleService } from '@main/services/RoleService';
-import { commonUtils, logger } from 'tspa';
+import { commonUtils, Objects, Optional } from 'tspa';
 import { UserDto } from '@main/types/dto';
 import { AuthenticationException } from '@main/exception/AuthenticationException';
-import { fromAccessClientToOAuth2AccessClient } from '@main/util/mapper';
+import {
+  fromAccessClientToOAuth2AccessClient,
+  fromUserToUserDto
+} from '@main/util/mapper';
 import { getScope } from '@main/util/commons';
+import { AccessClientService } from '@main/services/AccessClientService';
 
 let userService: UserService;
 let tokenService: TokenService;
 let roleService: RoleService;
+let accessClientService: AccessClientService;
 const getClient = async (
   clientId: string,
   clientSecret: string
 ): Promise<OAuth2AccessClient | undefined> => {
-  //TODO: This should ideally be stored in AWS Secrets Manager, KMS, but I don't have the time to set that up right now
-  logger.info('Getting client:', { clientId, clientSecret });
-  const client: AccessClient | undefined = await tokenService.findSecret(
+  //TODO: This should ideally be stored in AWS Secrets Manager, KMS, but I don't have the time to set that up right now.
+  const client: Optional<AccessClient> = await accessClientService.findSecret(
     clientId,
     clientSecret
   );
 
-  if (!client) {
-    logger.info('Unrecognized client:', clientId);
+  if (client.isEmpty()) {
     return undefined;
   }
 
-  return fromAccessClientToOAuth2AccessClient(client);
+  const authClient = client.get();
+  return fromAccessClientToOAuth2AccessClient(authClient);
 };
 
 const getUser = async (
@@ -47,15 +52,16 @@ const getUser = async (
   password: string,
   client: OAuth2AccessClient
 ): Promise<UserDto | undefined> => {
-  logger.info('Getting user:', { username, password, client });
-  const user = await userService.findUserByUsernameAndPassword(
+  const user: Optional<User> = await userService.findUserByUsernameAndPassword(
     username,
     password
   );
 
-  logger.debug('Found user:', user);
-  if (!user || user.machineId !== client.machineId) return undefined;
-  return user;
+  if (user.isEmpty() || user.get().machineId !== client.machineId) {
+    return undefined;
+  }
+  const authUser = user.get();
+  return fromUserToUserDto(authUser);
 };
 
 const saveToken = async (
@@ -63,7 +69,6 @@ const saveToken = async (
   client: OAuth2AccessClient,
   user: UserDto
 ): Promise<OAuth2Tokens> => {
-  logger.info('Saving token:', { token, client, user });
   const {
     accessToken,
     refreshToken,
@@ -71,14 +76,15 @@ const saveToken = async (
     refreshTokenExpiresAt,
     scope
   } = token;
-  if (
-    commonUtils.isAnyEmpty(user.id, client.id, client.machineId) ||
-    (commonUtils.isEmpty(accessToken) && commonUtils.isEmpty(refreshToken))
-  ) {
+  Objects.requireNonEmpty(
+    [user.id, client.id, client.machineId],
+    new AuthenticationException('Invalid token data')
+  );
+  if (commonUtils.isEmpty(accessToken) && commonUtils.isEmpty(refreshToken)) {
     throw new AuthenticationException('Invalid token data');
   }
 
-  const _accessToken: AccessToken = {
+  const newAccessToken: AccessToken = {
     type: commonUtils.isEmpty(accessToken) ? 'refresh' : 'access',
     userId: user.id!,
     clientId: client.id!,
@@ -93,8 +99,7 @@ const saveToken = async (
     scope: scope || []
   };
 
-  const newToken: AccessToken = await tokenService.saveToken(_accessToken);
-  if (!newToken) throw new AuthenticationException('Failed to save token');
+  const newToken: AccessToken = await tokenService.saveToken(newAccessToken);
 
   return {
     accessToken: accessToken || '',
@@ -110,52 +115,75 @@ const saveToken = async (
 const getAccessToken = async (
   accessToken: string
 ): Promise<OAuth2AccessToken | undefined> => {
-  logger.info('Getting access token:', accessToken);
-  const token: AccessToken | undefined =
-    await tokenService.findTokenByAccessToken(accessToken);
-  if (!token || commonUtils.isEmpty(token.accessToken)) return undefined;
-  const { accessTokenExpiresAt, userId } = token;
-  const user: UserDto | undefined = await userService.findUserById(userId);
-  if (!user) return undefined;
-  const client: AccessClient | undefined = await tokenService.findSecretBy({
-    clientId: token.clientId
-  });
-  if (!client) return undefined;
+  const token: Optional<AccessToken> =
+    await tokenService.findAccessToken(accessToken);
+
+  if (token.isEmpty()) {
+    return undefined;
+  }
+
+  const { accessTokenExpiresAt, userId, clientId, scope } = token.get();
+
+  const user: Optional<User> = await userService.findUserById(userId);
+  if (user.isEmpty()) {
+    return undefined;
+  }
+
+  const client: Optional<AccessClient> = await accessClientService.findSecretBy(
+    {
+      clientId
+    }
+  );
+
+  if (client.isEmpty()) {
+    return undefined;
+  }
 
   return {
     accessToken,
     accessTokenExpiresAt: accessTokenExpiresAt
       ? new Date(accessTokenExpiresAt)
       : undefined,
-    user,
-    client: fromAccessClientToOAuth2AccessClient(client),
-    scope: getScope(token.scope)
+    user: fromUserToUserDto(user.get()),
+    client: fromAccessClientToOAuth2AccessClient(client.get()),
+    scope: getScope(scope)
   };
 };
 
 const getRefreshToken = async (
   refreshToken: string
 ): Promise<OAuth2RefreshToken | undefined> => {
-  logger.info('Getting refresh token:', refreshToken);
-  const token: AccessToken | undefined =
-    await tokenService.findTokenByRefreshToken(refreshToken);
-  if (!token) return undefined;
-  const { refreshTokenExpiresAt, userId } = token;
-  const user: UserDto | undefined = await userService.findUserById(userId);
-  if (!user) return undefined;
-  const client: AccessClient | undefined = await tokenService.findSecretBy({
-    clientId: token.clientId
-  });
-  if (!client) return undefined;
+  const token: Optional<AccessToken> =
+    await tokenService.findRefreshToken(refreshToken);
+  if (token.isEmpty()) {
+    return undefined;
+  }
+
+  const { refreshTokenExpiresAt, userId, clientId, scope } = token.get();
+
+  const user: Optional<User> = await userService.findUserById(userId);
+  if (user.isEmpty()) {
+    return undefined;
+  }
+
+  const client: Optional<AccessClient> = await accessClientService.findSecretBy(
+    {
+      clientId
+    }
+  );
+
+  if (client.isEmpty()) {
+    return undefined;
+  }
 
   return {
     refreshToken,
     refreshTokenExpiresAt: refreshTokenExpiresAt
       ? new Date(refreshTokenExpiresAt)
       : undefined,
-    user,
-    client: fromAccessClientToOAuth2AccessClient(client),
-    scope: getScope(token.scope)
+    user: fromUserToUserDto(user.get()),
+    client: fromAccessClientToOAuth2AccessClient(client.get()),
+    scope: getScope(scope)
   };
 };
 
@@ -165,9 +193,10 @@ const generateToken = async (
   user: UserDto,
   scope: string[]
 ): Promise<string> => {
-  if (commonUtils.isAnyEmpty(user.id, client.id)) {
-    throw new AuthenticationException('Invalid user or client');
-  }
+  Objects.requireNonEmpty(
+    [user.id, client.id],
+    new AuthenticationException('Invalid user or client')
+  );
 
   return tokenService.generateToken(type, client, user, scope);
 };
@@ -177,7 +206,6 @@ const generateRefreshToken = async (
   user: UserDto,
   scope: string[]
 ): Promise<string> => {
-  logger.info('Generating refresh token:', { client, user, scope });
   return generateToken('refresh', client, user, scope);
 };
 
@@ -186,7 +214,6 @@ const generateAccessToken = async (
   user: UserDto,
   scope: string[]
 ): Promise<string> => {
-  logger.info('Generating access token:', { client, user, scope });
   return generateToken('access', client, user, scope);
 };
 
@@ -194,32 +221,33 @@ const verifyScope = async (
   token: OAuth2AccessToken,
   scope: string | string[]
 ): Promise<boolean> => {
-  logger.info('Verifying scope:', { token, scope });
   const scopes: string[] = Array.isArray(scope) ? scope : [scope];
   if (scopes.length === 0) return false;
   const { accessToken } = token;
-  const _token = await getAccessToken(accessToken);
-  if (!_token) return false;
-  return scopes.every((s) => _token.scope!.includes(s));
+  const existingToken = await getAccessToken(accessToken);
+  if (!existingToken) return false;
+  return scopes.every((s) => existingToken.scope!.includes(s));
 };
 
 const getUserFromClient = async (
   client: OAuth2AccessClient
 ): Promise<UserDto | undefined> => {
-  logger.info('Getting user from client:', client);
   const { id, secret } = client;
   const clientData: OAuth2AccessClient | undefined = await getClient(
     id,
     secret
   );
   if (!clientData) return undefined;
-  const user: UserDto | undefined = await userService.findBy({ machineId: id });
-  if (!user) return undefined;
-  return { id: user.id!, username: user.username! } as UserDto;
+  const user: Optional<User> = await userService.findOneBy({
+    machineId: id
+  });
+  if (user.isEmpty()) return undefined;
+  return user.map((u) => fromUserToUserDto(u)).get();
 };
 
-const revokeToken = async (refreshToken: string): Promise<boolean> => {
-  logger.info('Revoking token:', refreshToken);
+const revokeToken = async (
+  refreshToken: OAuth2RefreshToken
+): Promise<boolean> => {
   return await tokenService.revokeToken(refreshToken);
 };
 
@@ -228,15 +256,12 @@ const validateScope = async (
   client: OAuth2AccessClient,
   scope: string | string[] = []
 ): Promise<string[] | undefined> => {
-  logger.info('Validating scope:', { user, client, scope });
   if (commonUtils.isAnyEmpty(scope, user.id, client.id)) {
-    logger.error('Invalid validation data 1', { user, client, scope });
     return undefined;
   }
 
   const scopes: string[] = getScope(scope);
   if (scopes.length === 0) {
-    logger.error('Invalid validation data 2', { user, client, scope });
     return undefined;
   }
 
@@ -246,42 +271,42 @@ const validateScope = async (
   );
 
   if (!clientData) {
-    logger.error('Invalid validation data 3', { user, client, scope });
     return undefined;
   }
 
-  const userFromClient: UserDto | undefined = await userService.findUserById(
+  const userFromClient: Optional<User> = await userService.findUserById(
     user.id
   );
-  if (!userFromClient || userFromClient.machineId !== client.machineId) {
-    logger.error('Invalid validation data 4', { user, client, scope });
+  if (
+    userFromClient.isEmpty() ||
+    userFromClient.get().machineId !== client.machineId
+  ) {
     return undefined;
   }
 
-  const role: Role | undefined = await roleService.findRoleById(
-    userFromClient.roleId
+  const role: Optional<Role> = await roleService.findRoleById(
+    userFromClient.get().roleId
   );
 
-  if (!role || role.privileges.length === 0) {
-    logger.error('Invalid validation data 5', { user, client, scope });
+  if (role.isEmpty() || role.get().privileges.length === 0) {
     return undefined;
   }
   const check = scopes.every(
-    (s) => role.name.toLowerCase() === s.toLowerCase()
+    (s) => role.get().name.toLowerCase() === s.toLowerCase()
   );
-  logger.info('Validating scope > valid scopes?:', { check, scopes });
   return check ? scopes : undefined;
 };
 
 export default (
   injectedUserService: UserService,
   injectedTokenService: TokenService,
+  injectedAccessClientService: AccessClientService,
   injectedRoleService: RoleService
 ): Oauth2AuthHandler => {
   userService = injectedUserService;
   tokenService = injectedTokenService;
+  accessClientService = injectedAccessClientService;
   roleService = injectedRoleService;
-  logger.info('oauth2Handler initialized');
 
   return {
     getClient,

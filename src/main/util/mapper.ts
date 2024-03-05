@@ -1,5 +1,5 @@
-import { AccessClient, Product, User } from '@main/types/store';
-import { ProductDto, UserDto } from '@main/types/dto';
+import { AccessClient, Product, Purchase, Role, User } from '@main/types/store';
+import { ProductDto, PurchaseDto, RoleDto, UserDto } from '@main/types/dto';
 import { OAuth2AccessClient } from '@main/types/web';
 
 const fromUserToUserDto = (user: User): UserDto => {
@@ -42,8 +42,35 @@ const fromAccessClientToOAuth2AccessClient = (
   };
 };
 
+const fromPurchaseToPurchaseDto = (purchase: Purchase): PurchaseDto => {
+  const { id, productId, buyerId, sellerId, amount, status, dateCreated } =
+    purchase;
+  return {
+    id: id!,
+    productId,
+    buyerId,
+    sellerId,
+    amount,
+    status,
+    dateCreated: dateCreated!
+  };
+};
+
+const fromRoleToRoleDto = (role: Role): RoleDto => {
+  const { id, name, privileges, dateCreated, dateUpdated } = role;
+  return {
+    id: id!,
+    name,
+    privileges,
+    dateCreated: dateCreated!,
+    dateUpdated: dateUpdated!
+  };
+};
+
 export {
   fromUserToUserDto,
   fromProductToProductDto,
-  fromAccessClientToOAuth2AccessClient
+  fromAccessClientToOAuth2AccessClient,
+  fromPurchaseToPurchaseDto,
+  fromRoleToRoleDto
 };

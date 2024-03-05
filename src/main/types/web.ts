@@ -1,6 +1,5 @@
 import { NextFunction, Request, Response } from 'express';
 import { UserDto } from '@main/types/dto';
-import { Privilege } from '@main/types/store';
 
 export interface OAuth2AccessClient {
   id: string;
@@ -36,9 +35,13 @@ export type OAuth2Tokens = OAuth2AccessToken & OAuth2RefreshToken;
 
 export interface UserHandler {
   createUser: (request: Request, response: Response) => Promise<void>;
+  createAdmin: (request: Request, response: Response) => Promise<void>;
   fetchUserById: (request: Request, response: Response) => Promise<void>;
+  fetchAllUsers: (request: Request, response: Response) => Promise<void>;
   makeDeposit: (request: Request, response: Response) => Promise<void>;
+  resetDeposit: (request: Request, response: Response) => Promise<void>;
   updateRole: (request: Request, response: Response) => Promise<void>;
+  changePassword: (request: Request, response: Response) => Promise<void>;
   deleteUser: (request: Request, response: Response) => Promise<void>;
 }
 
@@ -47,6 +50,11 @@ export interface ProductHandler {
   fetchProductById: (request: Request, response: Response) => Promise<void>;
   fetchAllProducts: (request: Request, response: Response) => Promise<void>;
   updateProduct: (request: Request, response: Response) => Promise<void>;
+  makePurchase: (request: Request, response: Response) => Promise<void>;
+  fetchPurchasesByProductId: (
+    request: Request,
+    response: Response
+  ) => Promise<void>;
   deleteProduct: (request: Request, response: Response) => Promise<void>;
 }
 
@@ -67,11 +75,15 @@ export interface RequestHandler {
 }
 
 export interface PurchaseHandler {
-  createPurchase: (request: Request, response: Response) => Promise<void>;
+  getPurchases: (request: Request, response: Response) => Promise<void>;
+}
+
+export interface RoleHandler {
+  getRoles: (request: Request, response: Response) => Promise<void>;
 }
 
 export interface GenericHandler<A, R> {
-  handle: (arg?: A) => R;
+  run: (arg?: A) => R;
 }
 
 export interface Oauth2AuthHandler {
@@ -100,7 +112,7 @@ export interface Oauth2AuthHandler {
     user: UserDto,
     scope: string[]
   ) => Promise<string>;
-  revokeToken: (refreshToken: string) => Promise<boolean>;
+  revokeToken: (refreshToken: OAuth2RefreshToken) => Promise<boolean>;
   validateScope: (
     user: UserDto,
     client: OAuth2AccessClient,
@@ -134,7 +146,6 @@ export interface AuthorizationHandler {
 
 export interface PermissionsConfig {
   roles?: string[];
-  privileges?: Privilege[];
   onlyOwner?: boolean;
-  entityName?: string;
+  entityName?: 'product' | 'user' | 'role' | 'purchase';
 }

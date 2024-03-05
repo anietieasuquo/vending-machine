@@ -1,32 +1,26 @@
 import { Request, Response } from 'express';
 import { PurchaseHandler } from '@main/types/web';
-import { CreatePurchaseResponse, PurchaseRequest } from '@main/types/dto';
-import { commonUtils, logger } from 'tspa';
+import { PurchaseDto } from '@main/types/dto';
+import { logger } from 'tspa';
 import { PurchaseService } from '@main/services/PurchaseService';
 import { executeRequest } from '@main/handlers/requestHandler';
+import { fromPurchaseToPurchaseDto } from '@main/util/mapper';
+import { Purchase } from '@main/types/store';
 
 let purchaseService: PurchaseService;
 
-const createPurchase = async (
+const getPurchases = async (
   request: Request,
   response: Response
 ): Promise<void> => {
-  await executeRequest<CreatePurchaseResponse>(
+  await executeRequest<PurchaseDto[]>(
     async () => {
-      logger.info('Creating purchase:', request.body);
-      const { productId, userId, quantity }: PurchaseRequest = request.body;
-      if (commonUtils.isAnyEmpty(productId, userId, quantity)) {
-        throw new Error('Invalid purchase data');
-      }
+      logger.info('Fetching purchases:');
 
-      const purchaseResponse: CreatePurchaseResponse =
-        await purchaseService.createPurchase(request.body as PurchaseRequest);
-
-      logger.info('Purchase created:', purchaseResponse);
-
-      return purchaseResponse;
+      const purchases: Purchase[] = await purchaseService.getPurchases();
+      return purchases.map(fromPurchaseToPurchaseDto);
     },
-    201,
+    200,
     response,
     request
   );
@@ -36,6 +30,6 @@ export default (injectedPurchaseService: PurchaseService): PurchaseHandler => {
   purchaseService = injectedPurchaseService;
 
   return {
-    createPurchase
+    getPurchases
   };
 };

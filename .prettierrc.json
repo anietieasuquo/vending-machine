@@ -1,4 +1,5 @@
 {
+  "parser": "typescript",
   "bracketSpacing": true,
   "jsxSingleQuote": false,
   "trailingComma": "none",
@@ -6,5 +7,11 @@
   "singleQuote": true,
   "semi": true,
   "tabWidth": 2,
-  "bracketSameLine": true
+  "bracketSameLine": true,
+  "useTabs": false,
+  "proseWrap": "preserve",
+  "endOfLine": "lf",
+  "singleAttributePerLine": false,
+  "embeddedLanguageFormatting": "auto",
+  "quoteProps": "as-needed"
 }
